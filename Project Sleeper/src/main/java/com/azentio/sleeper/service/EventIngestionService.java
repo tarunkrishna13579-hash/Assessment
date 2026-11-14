@@ -1,51 +1,64 @@
+
 package com.azentio.sleeper.service;
 
 import java.math.BigDecimal;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.azentio.sleeper.dto.CoreEventRequest;
 import com.azentio.sleeper.enums.AccountStatus;
 import com.azentio.sleeper.enums.EventType;
 import com.azentio.sleeper.model.Account;
+import com.azentio.sleeper.model.BankingEvent;
+import com.azentio.sleeper.repository.AccountRepository;
+import com.azentio.sleeper.repository.BankingEventRepository;
 
 @Service
 public class EventIngestionService {
 
-    private final Map<String, Account> accounts = new HashMap<>();
+    private final AccountRepository accountRepository;
 
-    private final Set<String> processedEventIds = new HashSet<>();
+    private final BankingEventRepository eventRepository;
 
-    public synchronized boolean ingestEvent(CoreEventRequest event) {
+    private final FraudDetectionService fraudDetectionService;
+
+    public EventIngestionService(
+            AccountRepository accountRepository,
+            BankingEventRepository eventRepository,
+            FraudDetectionService fraudDetectionService) {
+
+        this.accountRepository = accountRepository;
+        this.eventRepository = eventRepository;
+        this.fraudDetectionService = fraudDetectionService;
+    }
+
+    @Transactional
+    public boolean ingestEvent(CoreEventRequest event) {
 
         validateEvent(event);
 
-        // Step 1: Check duplicate event
-        if (processedEventIds.contains(event.getEventId())) {
+        // Persistent duplicate check
+        if (eventRepository.existsById(event.getEventId())) {
             return true;
         }
 
-        // Step 2: Find account
         String accountNumber = event.getAccountNumber();
 
-        Account account = accounts.get(accountNumber);
+        Account account = accountRepository
+                .findById(accountNumber)
+                .orElse(null);
 
         boolean newAccount = account == null;
 
-        // Step 3: Create unknown account as ACTIVE
         if (newAccount) {
             account = new Account(
-                accountNumber,
-                event.getBranchCode(),
-                event.getBalanceAfter()
+                    accountNumber,
+                    event.getBranchCode(),
+                    event.getBalanceAfter()
             );
         }
 
-        // Step 4: Process banking event
         switch (event.getType()) {
 
             case DORMANCY_MARKED:
@@ -53,7 +66,7 @@ public class EventIngestionService {
                 account.setStatus(AccountStatus.DORMANT);
 
                 account.setCurrentBalance(
-                    event.getBalanceAfter()
+                        event.getBalanceAfter()
                 );
 
                 break;
@@ -62,48 +75,60 @@ public class EventIngestionService {
 
                 if (account.getStatus() != AccountStatus.DORMANT) {
                     throw new IllegalStateException(
-                        "Account is not dormant. Cannot reactivate."
+                            "Cannot reactivate an account that is not dormant"
                     );
                 }
 
                 account.setStatus(AccountStatus.ACTIVE);
 
                 account.setReactivatedAt(
-                    event.getOccurredAt()
+                        event.getOccurredAt()
                 );
 
                 account.setBalanceAtReactivation(
-                    event.getBalanceAfter()
+                        event.getBalanceAfter()
                 );
 
-                account.setStaffId(
-                    event.getStaffId()
-                );
+                account.setStaffId(event.getStaffId());
 
                 account.setDrainedAmount(BigDecimal.ZERO);
 
                 account.setCurrentBalance(
-                    event.getBalanceAfter()
+                        event.getBalanceAfter()
                 );
+
+                fraudDetectionService.checkKycRule(account, event);
 
                 break;
 
             case DEBIT:
 
                 account.setCurrentBalance(
-                    event.getBalanceAfter()
+                        event.getBalanceAfter()
                 );
 
-                // Count only debits after latest reactivation
-                if (account.getReactivatedAt() != null &&
-                    !event.getOccurredAt().isBefore(
-                        account.getReactivatedAt())) {
+                if (account.getReactivatedAt() != null) {
 
-                    account.setDrainedAmount(
-                        account.getDrainedAmount().add(
-                            event.getAmount()
-                        )
-                    );
+                    boolean afterReactivation =
+                            !event.getOccurredAt()
+                                    .isBefore(account.getReactivatedAt());
+
+                    boolean withinWindow =
+                            !event.getOccurredAt()
+                                    .isAfter(account.getReactivatedAt()
+                                            .plusDays(30));
+
+                    if (afterReactivation && withinWindow) {
+
+                        account.setDrainedAmount(
+                                account.getDrainedAmount()
+                                        .add(event.getAmount())
+                        );
+
+                        fraudDetectionService.checkDrainRule(
+                                account, event
+                        );
+                    }
                 }
 
                 break;
@@ -111,19 +136,30 @@ public class EventIngestionService {
             case CREDIT:
 
                 account.setCurrentBalance(
-                    event.getBalanceAfter()
+                        event.getBalanceAfter()
                 );
 
                 break;
         }
 
-        // Step 5: Save account only after successful processing
-        if (newAccount) {
-            accounts.put(accountNumber, account);
-        }
+        // Persist account
+        accountRepository.save(account);
 
-        // Step 6: Record processed event ID
-        processedEventIds.add(event.getEventId());
+        // Persist successfully processed event
+        BankingEvent bankingEvent = new BankingEvent(
+                event.getEventId(),
+                accountNumber,
+                event.getBranchCode(),
+                event.getType().name(),
+                event.getAmount(),
+                event.getBalanceAfter(),
+                String.valueOf(event.getChannel()),
+                event.getStaffId(),
+                event.getKycRefreshed(),
+                event.getOccurredAt()
+        );
+
+        eventRepository.save(bankingEvent);
 
         return false;
     }
@@ -132,36 +168,71 @@ public class EventIngestionService {
 
         if (event == null) {
             throw new IllegalArgumentException(
-                "Event cannot be null"
+                    "Event cannot be null"
             );
         }
 
-        if (event.getType() == EventType.DEBIT ||
-            event.getType() == EventType.CREDIT) {
+        if (event.getEventId() == null
+                || event.getEventId().isBlank()) {
+            throw new IllegalArgumentException(
+                    "Event ID is required"
+            );
+        }
 
-            if (event.getAmount() == null ||
-                event.getAmount().signum() <= 0) {
+        if (event.getAccountNumber() == null
+                || event.getAccountNumber().isBlank()) {
+            throw new IllegalArgumentException(
+                    "Account number is required"
+            );
+        }
 
+        if (event.getType() == null) {
+            throw new IllegalArgumentException(
+                    "Event type is required"
+            );
+        }
+
+        if (event.getOccurredAt() == null) {
+            throw new IllegalArgumentException(
+                    "Event timestamp is required"
+            );
+        }
+
+        if (event.getBalanceAfter() == null
+                || event.getBalanceAfter()
+                        .compareTo(BigDecimal.ZERO) < 0) {
+            throw new IllegalArgumentException(
+                    "Valid balance is required"
+            );
+        }
+
+        if (event.getType() == EventType.DEBIT
+                || event.getType() == EventType.CREDIT) {
+
+            if (event.getAmount() == null
+                    || event.getAmount()
+                            .compareTo(BigDecimal.ZERO) <= 0) {
                 throw new IllegalArgumentException(
-                    "Positive amount is required for debit and credit"
+                        "Positive amount is required for debit and credit"
                 );
             }
         }
 
         if (event.getType() == EventType.REACTIVATED) {
 
-            if (event.getStaffId() == null ||
-                event.getStaffId().isBlank() ||
-                event.getKycRefreshed() == null) {
-
+            if (event.getStaffId() == null
+                    || event.getStaffId().isBlank()
+                    || event.getKycRefreshed() == null) {
                 throw new IllegalArgumentException(
-                    "Staff ID and KYC status are required"
+                        "Staff ID and KYC status are required"
                 );
             }
         }
     }
 
+    @Transactional(readOnly = true)
     public Account getAccount(String accountNumber) {
-        return accounts.get(accountNumber);
+        return accountRepository.findById(accountNumber)
+                .orElse(null);
     }
 }

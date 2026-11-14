@@ -1,3 +1,4 @@
+
 package com.azentio.sleeper.model;
 
 import java.math.BigDecimal;
@@ -5,23 +6,45 @@ import java.time.LocalDateTime;
 
 import com.azentio.sleeper.enums.AccountStatus;
 
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "accounts")
 public class Account {
 
+    @Id
+    @Column(name = "account_number", nullable = false)
     private String accountNumber;
 
+    @Column(name = "branch_code")
     private String branchCode;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private AccountStatus status;
 
+    @Column(name = "current_balance", precision = 19, scale = 2)
     private BigDecimal currentBalance;
 
+    @Column(name = "reactivated_at")
     private LocalDateTime reactivatedAt;
 
+    @Column(name = "balance_at_reactivation", precision = 19, scale = 2)
     private BigDecimal balanceAtReactivation;
 
+    @Column(name = "staff_id")
     private String staffId;
 
+    @Column(name = "drained_amount", precision = 19, scale = 2)
     private BigDecimal drainedAmount;
+
+    protected Account() {
+    }
 
     public Account(String accountNumber,
                    String branchCode,
@@ -72,7 +95,6 @@ public class Account {
 
     public void setBalanceAtReactivation(
             BigDecimal balanceAtReactivation) {
-
         this.balanceAtReactivation = balanceAtReactivation;
     }
 
