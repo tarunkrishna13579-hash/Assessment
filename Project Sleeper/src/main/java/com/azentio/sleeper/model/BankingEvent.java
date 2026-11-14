@@ -84,4 +84,27 @@ public class BankingEvent {
     public String getType() {
         return type;
     }
+    public String getBranchCode() {
+        return branchCode;
+    }
+
+    public BigDecimal getAmount() {
+        return amount;
+    }
+
+    public BigDecimal getBalanceAfter() {
+        return balanceAfter;
+    }
+
+    public String getChannel() {
+        return channel;
+    }
+
+    public String getStaffId() {
+        return staffId;
+    }
+
+    public Boolean getKycRefreshed() {
+        return kycRefreshed;
+    }
 }

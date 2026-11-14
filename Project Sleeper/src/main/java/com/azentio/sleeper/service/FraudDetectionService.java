@@ -5,6 +5,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -16,19 +17,25 @@ import com.azentio.sleeper.repository.FraudAlertRepository;
 @Service
 public class FraudDetectionService {
 
-    private static final BigDecimal DRAIN_RATIO =
-            new BigDecimal("0.80");
-
-    private static final BigDecimal MIN_BALANCE =
-            new BigDecimal("50000");
-
-    private static final int DRAIN_WINDOW_DAYS = 30;
-
     private final FraudAlertRepository alertRepository;
 
+    private final BigDecimal drainRatio;
+    private final BigDecimal minBalance;
+    private final long drainWindowDays;
+
     public FraudDetectionService(
-            FraudAlertRepository alertRepository) {
+            FraudAlertRepository alertRepository,
+            @Value("${sleeper.fraud.drain-ratio:0.80}")
+            BigDecimal drainRatio,
+            @Value("${sleeper.fraud.min-balance:50000}")
+            BigDecimal minBalance,
+            @Value("${sleeper.fraud.drain-window-days:30}")
+            long drainWindowDays) {
+
         this.alertRepository = alertRepository;
+        this.drainRatio = drainRatio;
+        this.minBalance = minBalance;
+        this.drainWindowDays = drainWindowDays;
     }
 
     @Transactional
@@ -40,8 +47,8 @@ public class FraudDetectionService {
             return;
         }
 
-        String key = createAlertKey(
-                account, "REACTIVATION_WITHOUT_KYC");
+        String rule = "REACTIVATION_WITHOUT_KYC";
+        String key = createAlertKey(account, rule);
 
         if (alertRepository.findByEpisodeKey(key).isPresent()) {
             return;
@@ -49,7 +56,7 @@ public class FraudDetectionService {
 
         FraudAlert alert = new FraudAlert(
                 key,
-                "REACTIVATION_WITHOUT_KYC",
+                rule,
                 account.getAccountNumber(),
                 account.getBranchCode(),
                 account.getStaffId(),
@@ -67,15 +74,14 @@ public class FraudDetectionService {
             Account account,
             CoreEventRequest event) {
 
-        LocalDateTime reactivatedAt =
-                account.getReactivatedAt();
+        LocalDateTime reactivatedAt = account.getReactivatedAt();
 
         if (reactivatedAt == null) {
             return;
         }
 
         LocalDateTime windowEnd =
-                reactivatedAt.plusDays(DRAIN_WINDOW_DAYS);
+                reactivatedAt.plusDays(drainWindowDays);
 
         if (event.getOccurredAt().isBefore(reactivatedAt)
                 || event.getOccurredAt().isAfter(windowEnd)) {
@@ -86,39 +92,33 @@ public class FraudDetectionService {
                 account.getBalanceAtReactivation();
 
         if (initialBalance == null
-                || initialBalance.compareTo(MIN_BALANCE) < 0) {
+                || initialBalance.compareTo(minBalance) < 0) {
             return;
         }
 
-        BigDecimal threshold =
-                initialBalance.multiply(DRAIN_RATIO);
-
-        BigDecimal drainedAmount =
-                account.getDrainedAmount();
+        BigDecimal threshold = initialBalance.multiply(drainRatio);
+        BigDecimal drainedAmount = account.getDrainedAmount();
 
         if (drainedAmount.compareTo(threshold) < 0) {
             return;
         }
 
-        String key = createAlertKey(
-                account, "POST_REACTIVATION_DRAIN");
+        String rule = "POST_REACTIVATION_DRAIN";
+        String key = createAlertKey(account, rule);
 
         FraudAlert alert = alertRepository
                 .findByEpisodeKey(key)
                 .orElse(null);
 
         if (alert != null) {
-
             alert.updateDrainAmount(
                     drainedAmount,
                     event.getOccurredAt()
             );
-
         } else {
-
             alert = new FraudAlert(
                     key,
-                    "POST_REACTIVATION_DRAIN",
+                    rule,
                     account.getAccountNumber(),
                     account.getBranchCode(),
                     account.getStaffId(),
@@ -132,9 +132,7 @@ public class FraudDetectionService {
         alertRepository.save(alert);
     }
 
-    private String createAlertKey(
-            Account account, String rule) {
-
+    private String createAlertKey(Account account, String rule) {
         return account.getAccountNumber()
                 + "|" + rule
                 + "|" + account.getReactivatedAt();

@@ -1,4 +1,3 @@
-
 package com.azentio.sleeper.controller;
 
 import java.util.Collection;
@@ -8,7 +7,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.azentio.sleeper.model.FraudAlert;
+import com.azentio.sleeper.dto.AlertResponse;
 import com.azentio.sleeper.service.FraudDetectionService;
 
 @RestController
@@ -24,10 +23,14 @@ public class AlertController {
     }
 
     @GetMapping("/alerts")
-    public ResponseEntity<Collection<FraudAlert>> getAlerts() {
+    public ResponseEntity<Collection<AlertResponse>> getAlerts() {
 
-        return ResponseEntity.ok(
+        Collection<AlertResponse> alerts =
                 fraudDetectionService.getAllAlerts()
-        );
+                        .stream()
+                        .map(AlertResponse::from)
+                        .toList();
+
+        return ResponseEntity.ok(alerts);
     }
 }
